@@ -1,7 +1,10 @@
+use crate::parser::Position;
+
 use super::{block::Block, expr::Expr};
 
 #[derive(Debug, Clone)]
-pub struct IfStruct {
+pub struct IfExpr {
+    pub position: Position,
     pub branches: Vec<Branch>,
     pub else_branch: Option<Box<Branch>>,
 }

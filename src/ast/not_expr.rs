@@ -1,9 +1,9 @@
 use crate::parser::Position;
 
-use super::expr::Expr;
+use super::Expr;
 
 #[derive(Debug, Clone)]
-pub struct Block {
+pub struct NotExpr {
     pub position: Position,
-    pub contents: Vec<Expr>,
+    pub condition: Box<Expr>,
 }

@@ -3,15 +3,16 @@ use crate::parser::Position;
 use super::{Expr, TypeAnnotation, Variable};
 
 #[derive(Debug, Clone)]
-pub struct Declaration {
+pub struct Closure {
     pub position: Position,
-    pub signature: VariableSignature,
-    pub value: Box<Expr>,
-    pub mutable: bool,
+    pub params: Vec<Parameter>,
+    pub return_type: TypeAnnotation,
+    pub body: Box<Expr>,
 }
 
 #[derive(Debug, Clone)]
-pub struct VariableSignature {
+pub struct Parameter {
+    pub position: Position,
     pub name: Variable,
     pub ty: TypeAnnotation,
 }

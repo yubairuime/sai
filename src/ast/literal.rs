@@ -13,4 +13,15 @@ pub enum LiteralType {
     Float,
     Bool,
     String,
+    Unit,
+}
+
+impl Literal {
+    pub fn unit(position: Position) -> Self {
+        Literal {
+            position: position,
+            ty: LiteralType::Unit,
+            value: "".to_string(),
+        }
+    }
 }

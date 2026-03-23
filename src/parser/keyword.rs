@@ -3,11 +3,11 @@ use std::{collections::HashMap, sync::LazyLock};
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Keyword {
     // Declarations
-    Let,    // let
-    Mut,    // mut
-    Set,    // set!
-    Def,    // def
-    Lambda, // fn
+    Let,     // let
+    Mut,     // mut
+    Set,     // set!
+    Def,     // def
+    Closure, // fn
 
     // Control flows
     If,
@@ -25,12 +25,13 @@ static KEYWORDS: LazyLock<HashMap<&'static str, Keyword>> = LazyLock::new(|| {
         ("mut", Keyword::Mut),
         ("set!", Keyword::Set),
         ("def", Keyword::Def),
-        ("fn", Keyword::Lambda),
+        ("fn", Keyword::Closure),
         ("if", Keyword::If),
         (":else", Keyword::Else),
         (":elif", Keyword::Elif),
         ("block", Keyword::Block),
         ("or", Keyword::Or),
+        ("and", Keyword::And),
         ("not", Keyword::Not),
     ])
 });

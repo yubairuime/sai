@@ -2,12 +2,17 @@ mod keyword;
 mod lexer;
 mod position;
 
-use keyword::Keyword;
+use keyword::{Keyword, parse_keyword};
 use lexer::TokenType;
 pub use lexer::{Lexer, Token};
 pub use position::Position;
 
-use crate::{ast::Program, diagnostics::{self, Diagnostic}};
+use crate::{
+    ast::{
+        AndExpr, Assignment, Block, Branch, Closure, Declaration, Expr, Funcall, IfExpr, Literal, LiteralType, NotExpr, OrExpr, Parameter, Program, TypeAnnotation, TypeExpr, Variable, VariableSignature
+    },
+    diagnostics::{self, Diagnostic},
+};
 
 #[derive(Debug, Clone)]
 pub struct Parser {
@@ -15,8 +20,11 @@ pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
     current_token: Option<Token>,
-    pub diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
 }
+
+type ParseResult<T> = Result<T, Vec<Diagnostic>>;
+type ClosureSignature = (Vec<Parameter>, TypeAnnotation);
 
 impl Parser {
     pub fn new(file: &str, tokens: Vec<Token>) -> Self {
@@ -30,43 +38,424 @@ impl Parser {
         }
     }
 
-    pub fn parse(&mut self) -> Option<Program> {
+    pub fn parse(&mut self) -> ParseResult<Program> {
         match self.read_all_tokentrees() {
             Ok(tokentrees) => {
-                println!("{:#?}", tokentrees);
+                let mut program = Program {
+                    name: self.file.clone(),
+                    expressions: vec![],
+                };
 
-                None
+                for tokentree in tokentrees {
+                    program.expressions.push(self.parse_tokentree(&tokentree));
+                }
+
+                if self.diagnostics.is_empty() {
+                    Ok(program)
+                } else {
+                    Err(self.diagnostics.clone())
+                }
             }
             Err(diagnostic) => {
                 self.diagnostics.push(diagnostic);
 
-                None
+                Err(self.diagnostics.clone())
             }
         }
     }
 
-    fn parse_tokentree(&self, tokentree: &TokenTree) {
-        
+    fn parse_tokentree(&mut self, tokentree: &TokenTree) -> Expr {
+        match tokentree {
+            TokenTree::Token(token) => self.parse_token(token),
+            TokenTree::List(list) => {
+                if list.items.is_empty() {
+                    self.report_error_and_return_unit(list.position.clone(), "Empty list")
+                } else {
+                    let head = &list.items[0];
+
+                    if let TokenTree::Token(token) = head {
+                        match token.ty {
+                            TokenType::Keyword => self.parse_special_forms(&token.value, list),
+                            TokenType::Symbol => self.parse_funcall(list),
+                            TokenType::IntLiteral
+                            | TokenType::FloatLiteral
+                            | TokenType::StringLiteral
+                            | TokenType::BoolLiteral => self.report_error_and_return_unit(
+                                token.position.clone(),
+                                "Unexpected literal",
+                            ),
+                            _ => self.report_error_and_return_unit(
+                                token.position.clone(),
+                                "Unexpected token",
+                            ),
+                        }
+                    } else {
+                        self.parse_funcall(list)
+                    }
+
+                }
+            }
+        }
     }
 
-    fn parse_special_forms(&self, keyword: Keyword, tokentree: &Vec<TokenTree>) {
+    fn parse_token(&mut self, token: &Token) -> Expr {
+        match token.ty {
+            TokenType::LParen | TokenType::RParen => {
+                self.report_error_and_return_unit(token.position.clone(), "Unexpected paren")
+            }
+            TokenType::Keyword => {
+                self.report_error_and_return_unit(token.position.clone(), "Unexpected keyword")
+            }
+            TokenType::Symbol => Expr::Variable(Variable {
+                position: token.position.clone(),
+                value: token.value.clone(),
+            }),
+            _ => self.parse_literal(token.clone()),
+        }
     }
 
-    fn parse_block(&self) {}
+    fn parse_literal(&self, token: Token) -> Expr {
+        let mut literal = Literal {
+            position: token.position,
+            value: token.value,
+            ty: LiteralType::Unit,
+        };
 
-    fn parse_defun(&self) {}
+        match token.ty {
+            TokenType::IntLiteral => literal.ty = LiteralType::Int,
+            TokenType::FloatLiteral => literal.ty = LiteralType::Float,
+            TokenType::BoolLiteral => literal.ty = LiteralType::Bool,
+            TokenType::StringLiteral => literal.ty = LiteralType::String,
+            _ => panic!(),
+        };
 
-    fn parse_declaration(&self) {}
+        Expr::Literal(literal)
+    }
 
-    fn parse_assignment(&self) {}
+    fn parse_special_forms(&mut self, keyword: &str, tokentree: &TokenTreeList) -> Expr {
+        match parse_keyword(keyword) {
+            Keyword::Block => self.parse_block(tokentree),
+            Keyword::Def => self.parse_defun(tokentree),
+            Keyword::Let => self.parse_declaration(tokentree, false),
+            Keyword::Mut => self.parse_declaration(tokentree, true),
+            Keyword::Set => self.parse_assignment(tokentree),
+            Keyword::If => self.parse_if(tokentree),
+            Keyword::Closure => self.parse_closure(tokentree),
+            Keyword::Or => self.parse_or(tokentree),
+            Keyword::And => self.parse_and(tokentree),
+            Keyword::Not => self.parse_not(tokentree),
+            Keyword::Else | Keyword::Elif => {
+                self.report_error_and_return_unit(tokentree.position.clone(), "Unexpected keyword")
+            }
+        }
+    }
 
-    fn parse_if(&self) {}
+    fn parse_funcall(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        let mut funcall = Funcall {
+            callee: Box::new(self.parse_tokentree(&tokenlist.items[0])),
+            args: vec![],
+        };
 
-    fn parse_lambda(&self) {}
+        for arg in &tokenlist.items[1..] {
+            funcall.args.push(self.parse_tokentree(arg));
+        }
 
-    fn advance(&mut self) {
-        self.index += 1;
-        self.current_token = self.tokens.get(self.index).cloned();
+        Expr::Funcall(funcall)
+    }
+
+    fn parse_block(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        let mut block = Block {
+            position: tokenlist.position.clone(),
+            contents: vec![],
+        };
+
+        for item in &tokenlist.items[1..] {
+            block.contents.push(self.parse_tokentree(item));
+        }
+
+        Expr::Block(block)
+    }
+
+    fn parse_defun(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        todo!()
+    }
+
+    fn parse_declaration(&mut self, tokenlist: &TokenTreeList, mutable: bool) -> Expr {
+        if tokenlist.items.len() != 3 {
+            self.report_error_and_return_unit(
+                tokenlist.position.clone(),
+                "bad syntax for declaration",
+            )
+        } else {
+            let variable_signature = tokenlist.items[1].clone();
+            let value = self.parse_tokentree(&tokenlist.items[2]);
+
+            if let TokenTree::List(list) = variable_signature {
+                let signature = match self.parse_variable_signature(&list) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        return self.report_error_and_return_unit(e.position.clone(), &e.msg);
+                    }
+                };
+
+                Expr::Declaration(Declaration {
+                    position: list.position.clone(),
+                    signature: signature,
+                    value: Box::new(value),
+                    mutable: mutable,
+                })
+            } else {
+                self.report_error_and_return_unit(
+                    tokenlist.position.clone(),
+                    "bad syntax for declaration",
+                )
+            }
+        }
+    }
+
+    fn parse_variable_signature(
+        &mut self,
+        tokenlist: &TokenTreeList,
+    ) -> Result<VariableSignature, Diagnostic> {
+        let items = tokenlist.items.as_slice();
+
+        match items {
+            [ty, name] => {
+                let annotation = self.parse_type(ty)?;
+                if let Expr::Variable(name) = self.parse_tokentree(name) {
+                    Ok(VariableSignature {
+                        name: name,
+                        ty: annotation,
+                    })
+                } else {
+                    Err(Diagnostic::new(tokenlist.position.clone(), "expected name"))
+                }
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn parse_type(&mut self, tokenlist: &TokenTree) -> Result<TypeAnnotation, Diagnostic> {
+        if let Expr::Variable(ty) = self.parse_tokentree(tokenlist) {
+            Ok(TypeAnnotation {
+                position: ty.position,
+                value: TypeExpr::Named(ty.value),
+            })
+        } else {
+            todo!()
+        }
+    }
+
+    fn parse_assignment(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() != 3 {
+            self.report_error_and_return_unit(
+                tokenlist.position.clone(),
+                "bad syntax for assignment",
+            )
+        } else {
+            let var = self.parse_tokentree(&tokenlist.items[1]);
+
+            if let Expr::Variable(var) = var {
+                let assignment = Assignment {
+                    position: tokenlist.position.clone(),
+                    variable: var,
+                    value: Box::new(self.parse_tokentree(&tokenlist.items[2])),
+                };
+
+                Expr::Assignment(assignment)
+            } else {
+                self.report_error_and_return_unit(tokenlist.position.clone(), "expected a variable")
+            }
+        }
+    }
+
+    fn parse_closure(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() <= 2 {
+            self.report_error_and_return_unit(tokenlist.position.clone(), "improper form of defining a closure")
+        } else {
+            let signature = tokenlist.items[1].clone();
+            let body = self.parse_block(&TokenTreeList {
+                position: tokenlist.items[2].get_position(),
+                items: tokenlist.items[1..].to_vec()
+            });
+
+            match signature {
+                TokenTree::Token(token) => self.report_error_and_return_unit(token.position, "unexpected token"),
+                TokenTree::List(mut list) => {
+                    let signature = self.parse_closure_signature(&mut list);
+
+                    match signature {
+                        Ok((parameters, return_ty)) => {
+                            Expr::Closure(Closure {
+                                position: tokenlist.position.clone(),
+                                params: parameters,
+                                return_type: return_ty,
+                                body: Box::new(body),
+                            })
+                        }
+                        Err(mut e) => {
+                            self.diagnostics.append(&mut e);
+
+                            Expr::Error
+                        }
+                    }
+                }
+            }
+
+        }
+    }
+
+    fn parse_closure_signature(&mut self, tokenlist: &mut TokenTreeList) -> Result<ClosureSignature, Vec<Diagnostic>> {
+        let mut diagnostics = vec![];
+
+        if tokenlist.items.is_empty() {
+            diagnostics.push(Diagnostic::new(tokenlist.position.clone(), "expected type"));
+
+            Err(diagnostics)
+        } else if tokenlist.items.len() == 1 {
+            match self.parse_type(&tokenlist.items[0]) {
+                Ok(return_ty) => Ok((vec![], return_ty)),
+                Err(e) => {
+                    diagnostics.push(e);
+                    Err(diagnostics)
+                }
+            }
+        } else {
+            let return_ty = match self.parse_type(&(tokenlist.items.pop().unwrap())) {
+                Ok(return_ty) => return_ty,
+                Err(e) => {
+                    diagnostics.push(e);
+                    return Err(diagnostics);
+                }
+            };
+
+            let mut parameters: Vec<Parameter> = vec![];
+
+            for item in &tokenlist.items {
+                match item {
+                    TokenTree::Token(token) => {
+                        diagnostics.push(Diagnostic::new(token.position.clone(), "expected parameter"));
+                    }
+                    TokenTree::List(list) => {
+                        match self.parse_parameter(list) {
+                            Ok(parameter) => parameters.push(parameter),
+                            Err(e) => diagnostics.push(e),
+                        }
+                    }
+                }
+            }
+
+            if diagnostics.is_empty() {
+                Ok((parameters, return_ty))
+            } else {
+                Err(diagnostics)
+            }
+        }
+    }
+
+    fn parse_parameter(&mut self, tokenlist: &TokenTreeList) -> Result<Parameter, Diagnostic> {
+        let items = tokenlist.items.as_slice();
+
+        match items {
+            [ty, name] => {
+                let annotation = self.parse_type(ty)?;
+                if let Expr::Variable(name) = self.parse_tokentree(name) {
+                    Ok(Parameter {
+                        position: tokenlist.position.clone(),
+                        name: Variable {
+                            position: name.position,
+                            value: name.value
+                        },
+                        ty: annotation,
+                    })
+                } else {
+                    Err(Diagnostic::new(tokenlist.position.clone(), "expected name"))
+                }
+            }
+            _ => Err(Diagnostic::new(tokenlist.position.clone(), "improper form of a parameter"))
+        }
+    }
+
+    fn parse_if(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() <= 2 {
+            self.report_error_and_return_unit(tokenlist.position.clone(), "bad syntax for if")
+        } else {
+            let if_expr = IfExpr {
+                position: tokenlist.position.clone(),
+                branches: vec![],
+                else_branch: None,
+            };
+
+            Expr::IfExpr(if_expr)
+        }
+    }
+
+    fn parse_branch(&mut self, items: &Vec<TokenTree>) -> Result<Branch, Diagnostic> {
+        // let mut branch: Branch;
+
+        // if items.len() <= 2 {
+        //     Err(Diagnostic::new(, msg))
+        // } else {
+        //     let condition = self.parse_tokentree(items[0]);
+        // }
+
+        todo!()
+    }
+
+    fn parse_or(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() <= 2 {
+            self.report_error_and_return_unit(
+                tokenlist.position.clone(),
+                "'or' requires at least 2 argument",
+            )
+        } else {
+            let mut or_operator = OrExpr {
+                position: tokenlist.position.clone(),
+                conditions: vec![],
+            };
+
+            for item in &tokenlist.items[1..] {
+                or_operator.conditions.push(self.parse_tokentree(item));
+            }
+
+            Expr::Or(or_operator)
+        }
+    }
+
+    fn parse_not(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() != 2 {
+            self.report_error_and_return_unit(
+                tokenlist.position.clone(),
+                "'not' requires only 1 argument.",
+            )
+        } else {
+            let not_operator = NotExpr {
+                position: tokenlist.position.clone(),
+                condition: Box::new(self.parse_tokentree(&tokenlist.items[1])),
+            };
+
+            Expr::Not(not_operator)
+        }
+    }
+
+    fn parse_and(&mut self, tokenlist: &TokenTreeList) -> Expr {
+        if tokenlist.items.len() <= 2 {
+            self.report_error_and_return_unit(
+                tokenlist.position.clone(),
+                "'and' requires at least 2 arguments",
+            )
+        } else {
+            let mut and_operator = AndExpr {
+                position: tokenlist.position.clone(),
+                conditions: vec![],
+            };
+
+            for item in &tokenlist.items[1..] {
+                and_operator.conditions.push(self.parse_tokentree(item));
+            }
+
+            Expr::And(and_operator)
+        }
     }
 
     fn read_all_tokentrees(&mut self) -> Result<Vec<TokenTree>, Diagnostic> {
@@ -90,7 +479,10 @@ impl Parser {
                 while let Some(current_token) = self.current_token.clone() {
                     if matches!(current_token.ty, TokenType::RParen) {
                         self.advance();
-                        return Ok(TokenTree::List(list));
+                        return Ok(TokenTree::List(TokenTreeList {
+                            position: left_paren_position,
+                            items: list,
+                        }));
                     }
 
                     list.push(self.read_tokentree()?);
@@ -104,13 +496,43 @@ impl Parser {
                 Ok(TokenTree::Token(current_token))
             }
         } else {
-            Ok(TokenTree::List(vec![]))
+            unreachable!()
         }
+    }
+
+    fn report_error_and_return_unit(&mut self, position: Position, msg: &str) -> Expr {
+        self.add_diagnostic(position.clone(), msg);
+
+        Expr::Literal(Literal::unit(position))
+    }
+
+    fn add_diagnostic(&mut self, position: Position, msg: &str) {
+        self.diagnostics.push(Diagnostic::new(position, msg));
+    }
+
+    fn advance(&mut self) {
+        self.index += 1;
+        self.current_token = self.tokens.get(self.index).cloned();
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum TokenTree {
     Token(Token),
-    List(Vec<TokenTree>),
+    List(TokenTreeList),
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenTreeList {
+    pub position: Position,
+    pub items: Vec<TokenTree>,
+}
+
+impl TokenTree {
+    pub fn get_position(&self) -> Position {
+        match self {
+            TokenTree::Token(token) => token.position.clone(),
+            TokenTree::List(list) => list.position.clone()
+        }
+    }
 }

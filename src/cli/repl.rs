@@ -24,14 +24,17 @@ pub fn repl() {
             }
         } else {
             let mut parser = Parser::new("<stdin>", tokens);
-            parser.parse();
+            let ast = parser.parse();
 
-            if !parser.diagnostics.is_empty() {
-                for diagnostic in parser.diagnostics {
-                    println!("{}", diagnostic);
+            match ast {
+                Ok(program) => {
+                    println!("{:#?}", program)
                 }
-            } else {
-                
+                Err(diagnostics) => {
+                    for diagnostic in diagnostics {
+                        println!("{}", diagnostic);
+                    }
+                }
             }
 
             // println!("{:#?}", tokens);
