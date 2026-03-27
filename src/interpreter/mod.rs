@@ -8,10 +8,7 @@ pub struct Interpreter {
 
 impl Interpreter {
     pub fn new(file: String, source_code: String) -> Self {
-        Self {
-            file: file,
-            source_code: source_code,
-        }
+        Self { file: file, source_code: source_code }
     }
     pub fn eval(&self) {}
 }

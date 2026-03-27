@@ -38,11 +38,7 @@ impl Lexer {
         Lexer {
             input: chars,
             index: 0,
-            position: Position {
-                file: filename,
-                line: 1,
-                col: 1,
-            },
+            position: Position { file: filename, line: 1, col: 1 },
             current_char: current_char,
             diagnostics: vec![],
         }
@@ -130,10 +126,7 @@ impl Lexer {
                         Some('"') => value.push('"'),
                         Some(c) => value.push(c),
                         None => {
-                            self.diagnostics.push(Diagnostic::new(
-                                self.get_position(),
-                                "Unterminated string literal",
-                            ));
+                            self.diagnostics.push(Diagnostic::new(self.get_position(), "Unterminated string literal"));
                             self.advance();
 
                             return None;
@@ -144,8 +137,7 @@ impl Lexer {
                 }
                 '\n' => {
                     self.advance();
-                    self.diagnostics
-                        .push(Diagnostic::new(pos, "Unterminated string literal"));
+                    self.diagnostics.push(Diagnostic::new(pos, "Unterminated string literal"));
 
                     return None;
                 }
@@ -156,10 +148,7 @@ impl Lexer {
             }
         }
 
-        self.diagnostics.push(Diagnostic::new(
-            self.get_position(),
-            "Unterminated string literal",
-        ));
+        self.diagnostics.push(Diagnostic::new(self.get_position(), "Unterminated string literal"));
 
         None
     }

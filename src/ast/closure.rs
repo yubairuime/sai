@@ -1,13 +1,13 @@
 use crate::parser::Position;
 
-use super::{Expr, TypeAnnotation, Variable};
+use super::{Block, TypeAnnotation, Variable};
 
 #[derive(Debug, Clone)]
 pub struct Closure {
     pub position: Position,
     pub params: Vec<Parameter>,
     pub return_type: TypeAnnotation,
-    pub body: Box<Expr>,
+    pub body: Block,
 }
 
 #[derive(Debug, Clone)]

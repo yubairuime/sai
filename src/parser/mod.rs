@@ -1,17 +1,20 @@
 mod keyword;
 mod lexer;
 mod position;
+mod validator;
 
 use keyword::{Keyword, parse_keyword};
 use lexer::TokenType;
 pub use lexer::{Lexer, Token};
 pub use position::Position;
+use validator::ASTValidator;
 
 use crate::{
     ast::{
-        AndExpr, Assignment, Block, Branch, Closure, Declaration, Expr, Funcall, IfExpr, Literal, LiteralType, NotExpr, OrExpr, Parameter, Program, TypeAnnotation, TypeExpr, Variable, VariableSignature
+        AndExpr, Assignment, Block, Branch, Closure, Declaration, Defun, Expr, Funcall, IfExpr, Literal, LiteralType, NotExpr, OrExpr, Parameter, Program, TypeAnnotation, TypeExpr, Variable,
+        VariableSignature,
     },
-    diagnostics::{self, Diagnostic},
+    diagnostics::Diagnostic,
 };
 
 #[derive(Debug, Clone)]
@@ -51,7 +54,13 @@ impl Parser {
                 }
 
                 if self.diagnostics.is_empty() {
-                    Ok(program)
+                    let mut validator = ASTValidator::new();
+                    if let Err(mut e) = validator.validate(&program) {
+                        self.diagnostics.append(&mut e);
+                        Err(self.diagnostics.clone())
+                    } else {
+                        Ok(program)
+                    }
                 } else {
                     Err(self.diagnostics.clone())
                 }
@@ -69,7 +78,8 @@ impl Parser {
             TokenTree::Token(token) => self.parse_token(token),
             TokenTree::List(list) => {
                 if list.items.is_empty() {
-                    self.report_error_and_return_unit(list.position.clone(), "Empty list")
+                    self.add_diagnostic(list.position.clone(), "Empty list");
+                    Expr::Error
                 } else {
                     let head = &list.items[0];
 
@@ -77,22 +87,18 @@ impl Parser {
                         match token.ty {
                             TokenType::Keyword => self.parse_special_forms(&token.value, list),
                             TokenType::Symbol => self.parse_funcall(list),
-                            TokenType::IntLiteral
-                            | TokenType::FloatLiteral
-                            | TokenType::StringLiteral
-                            | TokenType::BoolLiteral => self.report_error_and_return_unit(
-                                token.position.clone(),
-                                "Unexpected literal",
-                            ),
-                            _ => self.report_error_and_return_unit(
-                                token.position.clone(),
-                                "Unexpected token",
-                            ),
+                            TokenType::IntLiteral | TokenType::FloatLiteral | TokenType::StringLiteral | TokenType::BoolLiteral => {
+                                self.add_diagnostic(token.position.clone(), "Unexpected literal");
+                                Expr::Error
+                            }
+                            _ => {
+                                self.add_diagnostic(token.position.clone(), "Unexpected token");
+                                Expr::Error
+                            }
                         }
                     } else {
                         self.parse_funcall(list)
                     }
-
                 }
             }
         }
@@ -101,10 +107,12 @@ impl Parser {
     fn parse_token(&mut self, token: &Token) -> Expr {
         match token.ty {
             TokenType::LParen | TokenType::RParen => {
-                self.report_error_and_return_unit(token.position.clone(), "Unexpected paren")
+                self.add_diagnostic(token.position.clone(), "Unexpected paren");
+                Expr::Error
             }
             TokenType::Keyword => {
-                self.report_error_and_return_unit(token.position.clone(), "Unexpected keyword")
+                self.add_diagnostic(token.position.clone(), "Unexpected keyword");
+                Expr::Error
             }
             TokenType::Symbol => Expr::Variable(Variable {
                 position: token.position.clone(),
@@ -114,7 +122,7 @@ impl Parser {
         }
     }
 
-    fn parse_literal(&self, token: Token) -> Expr {
+    fn parse_literal(&mut self, token: Token) -> Expr {
         let mut literal = Literal {
             position: token.position,
             value: token.value,
@@ -126,7 +134,10 @@ impl Parser {
             TokenType::FloatLiteral => literal.ty = LiteralType::Float,
             TokenType::BoolLiteral => literal.ty = LiteralType::Bool,
             TokenType::StringLiteral => literal.ty = LiteralType::String,
-            _ => panic!(),
+            _ => {
+                self.add_diagnostic(literal.position.clone(), "expeceted literal");
+                return Expr::Error;
+            }
         };
 
         Expr::Literal(literal)
@@ -145,13 +156,15 @@ impl Parser {
             Keyword::And => self.parse_and(tokentree),
             Keyword::Not => self.parse_not(tokentree),
             Keyword::Else | Keyword::Elif => {
-                self.report_error_and_return_unit(tokentree.position.clone(), "Unexpected keyword")
+                self.add_diagnostic(tokentree.position.clone(), "Unexpected keyword");
+                Expr::Error
             }
         }
     }
 
     fn parse_funcall(&mut self, tokenlist: &TokenTreeList) -> Expr {
         let mut funcall = Funcall {
+            position: tokenlist.position.clone(),
             callee: Box::new(self.parse_tokentree(&tokenlist.items[0])),
             args: vec![],
         };
@@ -164,12 +177,13 @@ impl Parser {
     }
 
     fn parse_block(&mut self, tokenlist: &TokenTreeList) -> Expr {
-        let mut block = Block {
-            position: tokenlist.position.clone(),
-            contents: vec![],
-        };
+        self.parse_expr_sequence_as_block(&tokenlist.items[1..], tokenlist.position.clone())
+    }
 
-        for item in &tokenlist.items[1..] {
+    fn parse_expr_sequence_as_block(&mut self, items: &[TokenTree], position: Position) -> Expr {
+        let mut block = Block { position: position, contents: vec![] };
+
+        for item in items {
             block.contents.push(self.parse_tokentree(item));
         }
 
@@ -177,15 +191,39 @@ impl Parser {
     }
 
     fn parse_defun(&mut self, tokenlist: &TokenTreeList) -> Expr {
-        todo!()
+        if tokenlist.items.len() <= 3 {
+            self.add_diagnostic(tokenlist.position.clone(), "improper form of defing a function");
+            Expr::Error
+        } else {
+            let name = match self.parse_variable(&tokenlist.items[1]) {
+                Ok(name) => name,
+                Err(e) => {
+                    self.diagnostics.push(e);
+                    return Expr::Error;
+                }
+            };
+            let closure = self.parse_closure(&TokenTreeList {
+                position: tokenlist.items[2].get_position(),
+                items: tokenlist.items[2..].to_vec(),
+            });
+
+            if let Expr::Closure(closure) = closure {
+                Expr::Defun(Defun {
+                    position: tokenlist.position.clone(),
+                    name: name,
+                    closure: closure,
+                })
+            } else {
+                self.add_diagnostic(tokenlist.items[2].get_position(), "expected a closure definition");
+                Expr::Error
+            }
+        }
     }
 
     fn parse_declaration(&mut self, tokenlist: &TokenTreeList, mutable: bool) -> Expr {
         if tokenlist.items.len() != 3 {
-            self.report_error_and_return_unit(
-                tokenlist.position.clone(),
-                "bad syntax for declaration",
-            )
+            self.add_diagnostic(tokenlist.position.clone(), "bad syntax for declaration");
+            Expr::Error
         } else {
             let variable_signature = tokenlist.items[1].clone();
             let value = self.parse_tokentree(&tokenlist.items[2]);
@@ -193,8 +231,9 @@ impl Parser {
             if let TokenTree::List(list) = variable_signature {
                 let signature = match self.parse_variable_signature(&list) {
                     Ok(signature) => signature,
-                    Err(e) => {
-                        return self.report_error_and_return_unit(e.position.clone(), &e.msg);
+                    Err(mut e) => {
+                        self.diagnostics.append(&mut e);
+                        return Expr::Error;
                     }
                 };
 
@@ -205,53 +244,64 @@ impl Parser {
                     mutable: mutable,
                 })
             } else {
-                self.report_error_and_return_unit(
-                    tokenlist.position.clone(),
-                    "bad syntax for declaration",
-                )
+                self.add_diagnostic(tokenlist.position.clone(), "bad syntax for declaration");
+                Expr::Error
             }
         }
     }
 
-    fn parse_variable_signature(
-        &mut self,
-        tokenlist: &TokenTreeList,
-    ) -> Result<VariableSignature, Diagnostic> {
+    fn parse_variable_signature(&mut self, tokenlist: &TokenTreeList) -> Result<VariableSignature, Vec<Diagnostic>> {
         let items = tokenlist.items.as_slice();
+        let mut diagnostics = vec![];
 
         match items {
-            [ty, name] => {
-                let annotation = self.parse_type(ty)?;
-                if let Expr::Variable(name) = self.parse_tokentree(name) {
-                    Ok(VariableSignature {
-                        name: name,
-                        ty: annotation,
-                    })
-                } else {
-                    Err(Diagnostic::new(tokenlist.position.clone(), "expected name"))
+            [ty, name] => match (self.parse_type(ty), self.parse_variable(name)) {
+                (Ok(ty), Ok(name)) => Ok(VariableSignature { ty: ty, name: name }),
+                (Err(e1), Err(e2)) => {
+                    diagnostics.push(e1);
+                    diagnostics.push(e2);
+                    Err(diagnostics)
                 }
+                (Err(e), _) => {
+                    diagnostics.push(e);
+                    Err(diagnostics)
+                }
+                (_, Err(e)) => {
+                    diagnostics.push(e);
+                    Err(diagnostics)
+                }
+            },
+            _ => {
+                diagnostics.push(Diagnostic::new(tokenlist.position.clone(), "improper form of variable signature"));
+
+                Err(diagnostics)
             }
-            _ => todo!(),
         }
     }
 
-    fn parse_type(&mut self, tokenlist: &TokenTree) -> Result<TypeAnnotation, Diagnostic> {
-        if let Expr::Variable(ty) = self.parse_tokentree(tokenlist) {
+    fn parse_type(&mut self, tokentree: &TokenTree) -> Result<TypeAnnotation, Diagnostic> {
+        if let Ok(ty) = self.parse_variable(tokentree) {
             Ok(TypeAnnotation {
                 position: ty.position,
                 value: TypeExpr::Named(ty.value),
             })
         } else {
-            todo!()
+            Err(Diagnostic::new(tokentree.get_position(), "improper form of type"))
+        }
+    }
+
+    fn parse_variable(&mut self, tokentree: &TokenTree) -> Result<Variable, Diagnostic> {
+        if let Expr::Variable(var) = self.parse_tokentree(tokentree) {
+            Ok(var)
+        } else {
+            Err(Diagnostic::new(tokentree.get_position(), "expected variable"))
         }
     }
 
     fn parse_assignment(&mut self, tokenlist: &TokenTreeList) -> Expr {
         if tokenlist.items.len() != 3 {
-            self.report_error_and_return_unit(
-                tokenlist.position.clone(),
-                "bad syntax for assignment",
-            )
+            self.add_diagnostic(tokenlist.position.clone(), "bad syntax for assignment");
+            Expr::Error
         } else {
             let var = self.parse_tokentree(&tokenlist.items[1]);
 
@@ -264,44 +314,45 @@ impl Parser {
 
                 Expr::Assignment(assignment)
             } else {
-                self.report_error_and_return_unit(tokenlist.position.clone(), "expected a variable")
+                self.add_diagnostic(tokenlist.position.clone(), "expected a variable");
+                Expr::Error
             }
         }
     }
 
     fn parse_closure(&mut self, tokenlist: &TokenTreeList) -> Expr {
         if tokenlist.items.len() <= 2 {
-            self.report_error_and_return_unit(tokenlist.position.clone(), "improper form of defining a closure")
+            self.add_diagnostic(tokenlist.position.clone(), "improper form of defining a closure");
+            Expr::Error
         } else {
             let signature = tokenlist.items[1].clone();
-            let body = self.parse_block(&TokenTreeList {
-                position: tokenlist.items[2].get_position(),
-                items: tokenlist.items[1..].to_vec()
-            });
+            let body = self.parse_expr_sequence_as_block(&tokenlist.items[2..], tokenlist.items[2].get_position());
 
-            match signature {
-                TokenTree::Token(token) => self.report_error_and_return_unit(token.position, "unexpected token"),
-                TokenTree::List(mut list) => {
-                    let signature = self.parse_closure_signature(&mut list);
-
-                    match signature {
-                        Ok((parameters, return_ty)) => {
-                            Expr::Closure(Closure {
-                                position: tokenlist.position.clone(),
-                                params: parameters,
-                                return_type: return_ty,
-                                body: Box::new(body),
-                            })
-                        }
-                        Err(mut e) => {
-                            self.diagnostics.append(&mut e);
-
-                            Expr::Error
-                        }
+            if let TokenTree::Token(token) = signature {
+                self.add_diagnostic(token.position, "unexpected token");
+                Expr::Error
+            } else if let TokenTree::List(mut list) = signature {
+                let (parameters, return_ty) = match self.parse_closure_signature(&mut list) {
+                    Ok((params, return_ty)) => (params, return_ty),
+                    Err(mut e) => {
+                        self.diagnostics.append(&mut e);
+                        return Expr::Error;
                     }
-                }
-            }
+                };
 
+                if let Expr::Block(body) = body {
+                    Expr::Closure(Closure {
+                        position: tokenlist.position.clone(),
+                        params: parameters,
+                        return_type: return_ty,
+                        body: body,
+                    })
+                } else {
+                    unreachable!()
+                }
+            } else {
+                unreachable!()
+            }
         }
     }
 
@@ -336,20 +387,14 @@ impl Parser {
                     TokenTree::Token(token) => {
                         diagnostics.push(Diagnostic::new(token.position.clone(), "expected parameter"));
                     }
-                    TokenTree::List(list) => {
-                        match self.parse_parameter(list) {
-                            Ok(parameter) => parameters.push(parameter),
-                            Err(e) => diagnostics.push(e),
-                        }
-                    }
+                    TokenTree::List(list) => match self.parse_parameter(list) {
+                        Ok(parameter) => parameters.push(parameter),
+                        Err(e) => diagnostics.push(e),
+                    },
                 }
             }
 
-            if diagnostics.is_empty() {
-                Ok((parameters, return_ty))
-            } else {
-                Err(diagnostics)
-            }
+            if diagnostics.is_empty() { Ok((parameters, return_ty)) } else { Err(diagnostics) }
         }
     }
 
@@ -364,7 +409,7 @@ impl Parser {
                         position: tokenlist.position.clone(),
                         name: Variable {
                             position: name.position,
-                            value: name.value
+                            value: name.value,
                         },
                         ty: annotation,
                     })
@@ -372,42 +417,124 @@ impl Parser {
                     Err(Diagnostic::new(tokenlist.position.clone(), "expected name"))
                 }
             }
-            _ => Err(Diagnostic::new(tokenlist.position.clone(), "improper form of a parameter"))
+            _ => Err(Diagnostic::new(tokenlist.position.clone(), "improper form of a parameter")),
         }
     }
 
     fn parse_if(&mut self, tokenlist: &TokenTreeList) -> Expr {
-        if tokenlist.items.len() <= 2 {
-            self.report_error_and_return_unit(tokenlist.position.clone(), "bad syntax for if")
-        } else {
-            let if_expr = IfExpr {
-                position: tokenlist.position.clone(),
-                branches: vec![],
-                else_branch: None,
-            };
+        if tokenlist.items.len() < 3 {
+            self.add_diagnostic(tokenlist.position.clone(), "bad syntax for if");
+            return Expr::Error;
+        }
 
+        let mut if_expr = IfExpr {
+            position: tokenlist.position.clone(),
+            branches: vec![],
+            else_branch: None,
+        };
+
+        let items = &tokenlist.items[1..];
+
+        let mut current_branch_start = 0;
+        let mut index = 0;
+        let mut seen_else = false;
+        let mut diagnostics = vec![];
+
+        while index < items.len() {
+            if let TokenTree::Token(token) = &items[index]
+                && matches!(token.ty, TokenType::Keyword)
+            {
+                match parse_keyword(&token.value) {
+                    Keyword::Elif => {
+                        if seen_else {
+                            diagnostics.push(Diagnostic::new(token.position.clone(), "'elif' cannot appear after 'else'"));
+                        }
+
+                        if index == current_branch_start {
+                            diagnostics.push(Diagnostic::new(token.position.clone(), "missing branch before 'elif'"));
+                        }
+
+                        match self.parse_branch(&items[current_branch_start..index], items[current_branch_start].get_position()) {
+                            Ok(branch) => if_expr.branches.push(branch),
+                            Err(e) => diagnostics.push(e),
+                        }
+
+                        current_branch_start = index + 1;
+                    }
+                    Keyword::Else => {
+                        if seen_else {
+                            diagnostics.push(Diagnostic::new(token.position.clone(), "duplicate 'else' branch"));
+                        }
+
+                        if index == current_branch_start {
+                            diagnostics.push(Diagnostic::new(token.position.clone(), "missing branch before 'else'"));
+                        }
+
+                        match self.parse_branch(&items[current_branch_start..index], items[current_branch_start].get_position()) {
+                            Ok(branch) => if_expr.branches.push(branch),
+                            Err(e) => diagnostics.push(e),
+                        }
+
+                        let else_items = &items[index + 1..];
+
+                        if else_items.is_empty() {
+                            diagnostics.push(Diagnostic::new(token.position.clone(), "'else' requires at least 1 body expression"));
+                        } else {
+                            let else_block = self.parse_expr_sequence_as_block(else_items, else_items[0].get_position());
+                            if_expr.else_branch = Some(Box::new(else_block));
+
+                            seen_else = true;
+
+                            if index + 1 < items.len() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            index += 1;
+        }
+
+        if !seen_else {
+            let tail = &items[current_branch_start..];
+            match self.parse_branch(tail, tail[0].get_position()) {
+                Ok(branch) => if_expr.branches.push(branch),
+                Err(e) => diagnostics.push(e),
+            }
+        }
+
+        if diagnostics.is_empty() {
             Expr::IfExpr(if_expr)
+        } else {
+            self.diagnostics.append(&mut diagnostics);
+            Expr::Error
         }
     }
 
-    fn parse_branch(&mut self, items: &Vec<TokenTree>) -> Result<Branch, Diagnostic> {
-        // let mut branch: Branch;
+    fn parse_branch(&mut self, items: &[TokenTree], position: Position) -> Result<Branch, Diagnostic> {
+        if items.len() < 2 {
+            return Err(Diagnostic::new(position, "branch requires a condition and at least one body expression"));
+        }
 
-        // if items.len() <= 2 {
-        //     Err(Diagnostic::new(, msg))
-        // } else {
-        //     let condition = self.parse_tokentree(items[0]);
-        // }
+        let condition = self.parse_tokentree(&items[0]);
+        let body = self.parse_expr_sequence_as_block(&items[1..], items[1].get_position());
 
-        todo!()
+        if let Expr::Block(block) = body {
+            Ok(Branch {
+                condition: Box::new(condition),
+                block: block,
+            })
+        } else {
+            unreachable!()
+        }
     }
 
     fn parse_or(&mut self, tokenlist: &TokenTreeList) -> Expr {
         if tokenlist.items.len() <= 2 {
-            self.report_error_and_return_unit(
-                tokenlist.position.clone(),
-                "'or' requires at least 2 argument",
-            )
+            self.add_diagnostic(tokenlist.position.clone(), "'or' requires at least 2 argument");
+            Expr::Error
         } else {
             let mut or_operator = OrExpr {
                 position: tokenlist.position.clone(),
@@ -424,10 +551,8 @@ impl Parser {
 
     fn parse_not(&mut self, tokenlist: &TokenTreeList) -> Expr {
         if tokenlist.items.len() != 2 {
-            self.report_error_and_return_unit(
-                tokenlist.position.clone(),
-                "'not' requires only 1 argument.",
-            )
+            self.add_diagnostic(tokenlist.position.clone(), "'not' requires only 1 argument.");
+            Expr::Error
         } else {
             let not_operator = NotExpr {
                 position: tokenlist.position.clone(),
@@ -440,10 +565,8 @@ impl Parser {
 
     fn parse_and(&mut self, tokenlist: &TokenTreeList) -> Expr {
         if tokenlist.items.len() <= 2 {
-            self.report_error_and_return_unit(
-                tokenlist.position.clone(),
-                "'and' requires at least 2 arguments",
-            )
+            self.add_diagnostic(tokenlist.position.clone(), "'and' requires at least 2 arguments");
+            Expr::Error
         } else {
             let mut and_operator = AndExpr {
                 position: tokenlist.position.clone(),
@@ -490,7 +613,7 @@ impl Parser {
 
                 Err(Diagnostic::new(left_paren_position, "'(' was never closed"))
             } else if matches!(current_token.ty, TokenType::RParen) {
-                Err(Diagnostic::new(current_token.position, "unmatch ')'"))
+                Err(Diagnostic::new(current_token.position, "unmatched ')'"))
             } else {
                 self.advance();
                 Ok(TokenTree::Token(current_token))
@@ -498,12 +621,6 @@ impl Parser {
         } else {
             unreachable!()
         }
-    }
-
-    fn report_error_and_return_unit(&mut self, position: Position, msg: &str) -> Expr {
-        self.add_diagnostic(position.clone(), msg);
-
-        Expr::Literal(Literal::unit(position))
     }
 
     fn add_diagnostic(&mut self, position: Position, msg: &str) {
@@ -532,7 +649,7 @@ impl TokenTree {
     pub fn get_position(&self) -> Position {
         match self {
             TokenTree::Token(token) => token.position.clone(),
-            TokenTree::List(list) => list.position.clone()
+            TokenTree::List(list) => list.position.clone(),
         }
     }
 }

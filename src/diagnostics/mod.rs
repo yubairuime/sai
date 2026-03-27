@@ -19,10 +19,6 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}\n{}",
-            self.position.file, self.position.line, self.position.col, self.msg
-        )
+        write!(f, "{}:{}:{}\n{}", self.position.file, self.position.line, self.position.col, self.msg)
     }
 }

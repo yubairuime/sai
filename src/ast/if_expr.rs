@@ -6,7 +6,7 @@ use super::{block::Block, expr::Expr};
 pub struct IfExpr {
     pub position: Position,
     pub branches: Vec<Branch>,
-    pub else_branch: Option<Box<Branch>>,
+    pub else_branch: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone)]

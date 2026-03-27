@@ -9,8 +9,5 @@ pub struct TypeAnnotation {
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(String),
-    Function {
-        params: Vec<TypeAnnotation>,
-        ret: Box<TypeAnnotation>,
-    },
+    Function { params: Vec<TypeAnnotation>, ret: Box<TypeAnnotation> },
 }
