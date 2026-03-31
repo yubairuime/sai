@@ -21,9 +21,9 @@ pub enum Expr {
     Assignment(Assignment),
 
     Block(Block),
-    IfExpr(IfExpr),
     Funcall(Funcall),
     Closure(Closure),
+    IfExpr(IfExpr),
     Or(OrExpr),
     And(AndExpr),
     Not(NotExpr),

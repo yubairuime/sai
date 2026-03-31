@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::{
     diagnostics,
     interpreter::{self, Interpreter},
-    parser::{Lexer, Parser},
+    parser::{Lexer, Parser}, types::TypeChecker,
 };
 
 pub fn repl() {
@@ -28,7 +28,15 @@ pub fn repl() {
 
             match ast {
                 Ok(program) => {
-                    println!("{:#?}", program)
+                    let mut type_checker = TypeChecker::new();
+
+                    if let Err(diagnostics) = type_checker.check_program(&program) {
+                        for diagnostic in diagnostics {
+                            println!("{}", diagnostic)
+                        }
+                    } else {
+                        
+                    }
                 }
                 Err(diagnostics) => {
                     for diagnostic in diagnostics {
@@ -36,11 +44,6 @@ pub fn repl() {
                     }
                 }
             }
-
-            // println!("{:#?}", tokens);
         }
-
-        // let interpreter = Interpreter::new("<stdin>".to_string(), input);
-        // interpreter.eval();
     }
 }
