@@ -96,13 +96,14 @@ impl TypeChecker {
     }
 
     fn check_defun(&mut self, defun: &Defun, env: &mut TypeEnv) -> Type {
-        let function_type = self.check_closure(&defun.closure, env);
+        let function_type = self.function_type_from_closure(&defun.closure);
+
         let symbol_info = SymbolInfo {
             ty: function_type,
             mutable: false,
         };
-
         env.insert(defun.name.value.clone(), symbol_info);
+        self.check_closure(&defun.closure, env);
 
         Type::Unit
     }
@@ -158,11 +159,51 @@ impl TypeChecker {
     }
 
     fn check_funcall(&mut self, funcall: &Funcall, env: &mut TypeEnv) -> Type {
-        todo!()
+        match self.check_expr(&funcall.callee, env) {
+            Type::Function { params, return_ty } => {
+                if params.len() != funcall.args.len() {
+                    self.add_diagnostic(funcall.callee.get_position(), "wrong number of arguments");
+                    Type::Error
+                } else {
+                    for index in 0..params.len() {
+                        if self.check_expr(&funcall.args[index], env) != params[index] {
+                            self.add_diagnostic(funcall.args[index].get_position(), "unmatched type");
+                        }
+                    }
+
+                    *return_ty
+                }
+            }
+            Type::Error => Type::Error,
+            _ => {
+                self.add_diagnostic(funcall.callee.get_position(), "callee is not a function");
+                Type::Error
+            }
+        }
     }
 
     fn check_closure(&mut self, closure: &Closure, env: &mut TypeEnv) -> Type {
-        todo!()
+        for param in &closure.params {
+            let param_info = SymbolInfo {
+                ty: self.check_type_annotation(&param.ty),
+                mutable: true
+            };
+
+            env.insert(param.name.value.clone(), param_info);
+        }
+
+        self.check_block(&closure.body, env)
+    }
+
+    fn function_type_from_closure(&mut self, closure: &Closure) -> Type {
+        let mut params_type: Vec<Type> = vec![];
+        let return_ty = Box::new(self.check_type_annotation(&closure.return_type));
+
+        for param in &closure.params {
+            params_type.push(self.check_type_annotation(&param.ty));
+        }
+
+        Type::Function { params: params_type, return_ty: return_ty }
     }
 
     fn check_if(&mut self, if_expr: &IfExpr, env: &mut TypeEnv) -> Type {
