@@ -8,21 +8,25 @@ type TypeEnv = HashMap<String, SymbolInfo>;
 
 #[derive(Debug, Clone)]
 pub struct TypeChecker {
+    env: TypeEnv,
     diagnostics: Vec<Diagnostic>
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
         TypeChecker {
+            env: TypeEnv::new(),
             diagnostics: vec![]
         }
     }
 
     pub fn check_program(&mut self, program: &Program) -> Result<(), Vec<Diagnostic>> {
-        let mut env = TypeEnv::new();
+        self.diagnostics.clear();
 
         for expr in &program.expressions {
+            let mut env = self.env.clone();
             self.check_expr(expr, &mut env);
+            self.env = env;
         }
 
         if self.diagnostics.is_empty() {
@@ -49,6 +53,105 @@ impl TypeChecker {
             Expr::Error => unreachable!()
         }
     }
+
+    fn builtin_funcall_name<'a>(&self, funcall: &'a Funcall) -> Option<&'a str> {
+        let Expr::Variable(variable) = funcall.callee.as_ref() else {
+            return None;
+        };
+
+        match variable.value.as_str() {
+            "+" | "-" | "*" | "/" | "=" | "<" | "<=" | ">" | ">=" | "len" | "nth" => Some(variable.value.as_str()),
+            _ => None,
+        }
+    }
+
+    fn check_builtin_funcall(&mut self, funcall: &Funcall, name: &str, env: &mut TypeEnv) -> Type {
+        match name {
+            "+" | "-" | "*" | "/" => self.check_numeric_builtin(funcall, env),
+            "=" => self.check_equality_builtin(funcall, env),
+            "<" | "<=" | ">" | ">=" => self.check_ordering_builtin(funcall, env),
+            _ => unreachable!(),
+        }
+    }
+
+    fn check_numeric_builtin(&mut self, funcall: &Funcall, env: &mut TypeEnv) -> Type {
+        if funcall.args.len() < 2 {
+            self.add_diagnostic(funcall.position.clone(), "arithmetic operators require at least 2 arguments");
+            return Type::Error;
+        }
+
+        let mut saw_float = false;
+
+        for arg in &funcall.args {
+            match self.check_expr(arg, env) {
+                Type::Int => {}
+                Type::Float => saw_float = true,
+                Type::Error => return Type::Error,
+                _ => {
+                    self.add_diagnostic(funcall.position.clone(), "arithmetic operators require all arguments to be ints or all arguments to be floats");
+                    return Type::Error;
+                }
+            }
+        }
+
+        let first_ty = self.check_expr(&funcall.args[0], env);
+        for arg in &funcall.args[1..] {
+            let arg_ty = self.check_expr(arg, env);
+            if arg_ty != first_ty {
+                self.add_diagnostic(funcall.position.clone(), "arithmetic operators require all arguments to have the same numeric type");
+                return Type::Error;
+            }
+        }
+
+        if saw_float { Type::Float } else { Type::Int }
+    }
+
+    fn check_equality_builtin(&mut self, funcall: &Funcall, env: &mut TypeEnv) -> Type {
+        if funcall.args.len() != 2 {
+            self.add_diagnostic(funcall.position.clone(), "wrong number of arguments");
+            return Type::Error;
+        }
+
+        let left_ty = self.check_expr(&funcall.args[0], env);
+        let right_ty = self.check_expr(&funcall.args[1], env);
+
+        if left_ty == Type::Error || right_ty == Type::Error {
+            return Type::Error;
+        }
+
+        if left_ty != right_ty {
+            self.add_diagnostic(funcall.position.clone(), "'=' requires both arguments to have the same type");
+            return Type::Error;
+        }
+
+        if matches!(left_ty, Type::Function { .. }) {
+            self.add_diagnostic(funcall.position.clone(), "'=' does not support functions");
+            Type::Error
+        } else {
+            Type::Bool
+        }
+    }
+
+    fn check_ordering_builtin(&mut self, funcall: &Funcall, env: &mut TypeEnv) -> Type {
+        if funcall.args.len() != 2 {
+            self.add_diagnostic(funcall.position.clone(), "wrong number of arguments");
+            return Type::Error;
+        }
+
+        let left_ty = self.check_expr(&funcall.args[0], env);
+        let right_ty = self.check_expr(&funcall.args[1], env);
+
+        match (&left_ty, &right_ty) {
+            (Type::Int, Type::Int) | (Type::Float, Type::Float) => Type::Bool,
+            (Type::Error, _) | (_, Type::Error) => Type::Error,
+            _ => {
+                self.add_diagnostic(funcall.position.clone(), "comparison operators require two ints or two floats");
+                Type::Error
+            }
+        }
+    }
+
+
 
     fn check_literal(&self, literal: &Literal) -> Type {
         match literal.ty {
@@ -159,6 +262,10 @@ impl TypeChecker {
     }
 
     fn check_funcall(&mut self, funcall: &Funcall, env: &mut TypeEnv) -> Type {
+        if let Some(name) = self.builtin_funcall_name(funcall) {
+            return self.check_builtin_funcall(funcall, name, env);
+        }
+
         match self.check_expr(&funcall.callee, env) {
             Type::Function { params, return_ty } => {
                 if params.len() != funcall.args.len() {
